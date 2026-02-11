@@ -3,6 +3,7 @@ const express = require("express");
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
+// Health check
 app.get("/", (req, res) => res.send("ok"));
 
 app.post("/", async (req, res) => {
@@ -11,19 +12,22 @@ app.post("/", async (req, res) => {
       return res.status(500).json({ error: "GROQ_API_KEY not set" });
     }
 
-    // Converter payload Responses → Chat Completions
     let messages = [];
 
+    // Se vier no formato Responses (input)
     if (typeof req.body.input === "string") {
       messages = [{ role: "user", content: req.body.input }];
-    } else if (Array.isArray(req.body.messages)) {
+    }
+    // Se vier no formato Chat (messages)
+    else if (Array.isArray(req.body.messages)) {
       messages = req.body.messages;
-    } else {
+    }
+    else {
       messages = [{ role: "user", content: "Hello" }];
     }
 
     const payload = {
-      model: "llama3-70b-8192",
+      model: "llama-3.1-70b-versatile",
       messages: messages,
       temperature: 0.2,
       max_tokens: 800
