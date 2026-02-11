@@ -5,53 +5,49 @@ app.use(express.json({ limit: "10mb" }));
 
 app.get("/", (req, res) => res.send("ok"));
 
-function normalizeTools(body) {
-  if (!body || !Array.isArray(body.tools)) return body;
-
-  const normalized = body.tools
-    .map((t) => {
-      // Convert Chat Completions tool format -> Responses tool format
-      // from: {type:"function", function:{name, description, parameters}}
-      // to:   {type:"function", name, description, parameters}
-      if (t && t.type === "function" && t.function && !t.name) {
-        return {
-          type: "function",
-          name: t.function.name,
-          description: t.function.description,
-          parameters: t.function.parameters,
-        };
-      }
-      return t;
-    })
-    // remove any invalid tools missing required "name"
-    .filter((t) => !(t && t.type === "function" && !t.name));
-
-  return { ...body, tools: normalized };
-}
-
 app.post("/", async (req, res) => {
   try {
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "OPENAI_API_KEY not set on server" });
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(500).json({ error: "GROQ_API_KEY not set" });
     }
 
-    const body = normalizeTools(req.body);
+    // Converter payload Responses → Chat Completions
+    let messages = [];
 
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify(body),
-    });
+    if (typeof req.body.input === "string") {
+      messages = [{ role: "user", content: req.body.input }];
+    } else if (Array.isArray(req.body.messages)) {
+      messages = req.body.messages;
+    } else {
+      messages = [{ role: "user", content: "Hello" }];
+    }
 
-    const text = await response.text();
-    res.status(response.status).type("application/json").send(text);
+    const payload = {
+      model: "llama3-70b-8192",
+      messages: messages,
+      temperature: 0.2,
+      max_tokens: 800
+    };
+
+    const response = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    const data = await response.text();
+    res.status(response.status).type("application/json").send(data);
+
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
 const port = process.env.PORT || 10000;
-app.listen(port, () => console.log("Proxy running on port", port));
+app.listen(port, () => console.log("Groq proxy running on", port));
