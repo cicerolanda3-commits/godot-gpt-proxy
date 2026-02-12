@@ -1,112 +1,171 @@
-const express = require("express");
+import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json());
 
-// Health check
-app.get("/", (req, res) => res.send("ok"));
+// =======================================================
+// CONFIG
+// =======================================================
 
-/**
- * O plugin do Godot pode mandar payload estilo "Responses" (input/tools)
- * e/ou enviar "model" de OpenAI (ex: gpt-4.1-mini).
- * Aqui a gente converte para Groq (chat.completions) e IGNORA o model do cliente.
- */
+const PORT = process.env.PORT || 10000;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-// Normaliza tools (aceita os dois formatos: Responses e Chat)
-function normalizeTools(body) {
-  if (!body || !Array.isArray(body.tools)) return body;
+// Modelo Groq atual funcionando (leve e grátis)
+const MODEL = "llama3-8b-8192";
 
-  const tools = body.tools.map((t) => {
-    // Chat Completions style -> Responses style
-    // {type:"function", function:{name,description,parameters}} -> {type:"function", name, description, parameters}
-    if (t && t.type === "function" && t.function && !t.name) {
-      return {
-        type: "function",
-        name: t.function.name,
-        description: t.function.description,
-        parameters: t.function.parameters,
-      };
-    }
-    return t;
+// =======================================================
+// LOG DE TUDO QUE CHEGA
+// =======================================================
+
+app.all("*", (req, res, next) => {
+  console.log("====================================");
+  console.log("INCOMING:", req.method, req.path);
+  console.log("Headers:", req.headers);
+  console.log("Body:", req.body);
+  console.log("====================================");
+  next();
+});
+
+// =======================================================
+// ROTA RAIZ (teste rápido no navegador)
+// =======================================================
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Godot GPT Proxy is running!",
+    endpoints: ["/v1/responses"],
   });
+});
 
-  return { ...body, tools };
-}
+// =======================================================
+// GET /v1/responses (caso Godot mande GET por erro)
+// =======================================================
 
-function toGroqChatPayload(body) {
-  // FORÇA um modelo Groq válido (ignora body.model)
-  const model = "llama-3.1-8b-instant";
+app.get("/v1/responses", (req, res) => {
+  res.json({
+    output: [
+      {
+        content: [
+          {
+            type: "output_text",
+            text: "Este endpoint precisa ser chamado via POST.",
+          },
+        ],
+      },
+    ],
+  });
+});
 
-  // messages
-  let messages = [];
-  if (Array.isArray(body.messages)) {
-    messages = body.messages;
-  } else if (typeof body.input === "string") {
-    messages = [{ role: "user", content: body.input }];
-  } else if (Array.isArray(body.input)) {
-    messages = [{ role: "user", content: JSON.stringify(body.input) }];
-  } else {
-    messages = [{ role: "user", content: "Hello" }];
-  }
+// =======================================================
+// POST /v1/responses (principal)
+// =======================================================
 
-  // tools -> formato do chat.completions (se existirem)
-  let tools = undefined;
-  if (Array.isArray(body.tools)) {
-    tools = body.tools
-      .map((t) => {
-        // Responses style -> Chat style
-        if (t && t.type === "function" && t.name) {
-          return {
-            type: "function",
-            function: {
-              name: t.name,
-              description: t.description,
-              parameters: t.parameters,
-            },
-          };
-        }
-        // já está chat style
-        if (t && t.type === "function" && t.function && t.function.name) return t;
-        return null;
-      })
-      .filter(Boolean);
-    if (tools.length === 0) tools = undefined;
-  }
-
-  return {
-    model,
-    messages,
-    tools,
-    tool_choice: body.tool_choice,
-    temperature: body.temperature ?? 0.2,
-    max_tokens: body.max_output_tokens ?? body.max_tokens ?? 800,
-  };
-}
-
-app.post("/", async (req, res) => {
+app.post("/v1/responses", async (req, res) => {
   try {
-    if (!process.env.GROQ_API_KEY) {
-      return res.status(500).json({ error: "GROQ_API_KEY not set on server" });
+    if (!GROQ_API_KEY) {
+      return res.status(400).json({
+        error: {
+          message: "Missing GROQ_API_KEY environment variable",
+        },
+      });
     }
 
-    const normalized = normalizeTools(req.body);
-    const payload = toGroqChatPayload(normalized);
+    // Godot envia algo tipo:
+    // { input: "oi" }
+    // ou { input: [{role:"user", content:"oi"}] }
 
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify(payload),
+    let userText = "Olá";
+
+    if (typeof req.body.input === "string") {
+      userText = req.body.input;
+    } else if (Array.isArray(req.body.input)) {
+      // pega último conteúdo
+      const last = req.body.input[req.body.input.length - 1];
+      if (last?.content) userText = last.content;
+    }
+
+    console.log("USER TEXT:", userText);
+
+    // =======================================================
+    // CHAMADA GROQ
+    // =======================================================
+
+    const groqResp = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Você é um assistente dentro do Godot, ajudando a criar jogos 2D.",
+            },
+            {
+              role: "user",
+              content: userText,
+            },
+          ],
+        }),
+      }
+    );
+
+    const data = await groqResp.json();
+
+    if (!data.choices) {
+      console.log("GROQ ERROR:", data);
+      return res.status(500).json({
+        error: {
+          message: "Groq API error",
+          details: data,
+        },
+      });
+    }
+
+    const answer = data.choices[0].message.content;
+
+    // =======================================================
+    // FORMATO EXATO QUE GODOT ESPERA (/v1/responses)
+    // =======================================================
+
+    return res.json({
+      output: [
+        {
+          content: [
+            {
+              type: "output_text",
+              text: answer,
+            },
+          ],
+        },
+      ],
     });
-
-    const text = await r.text();
-    res.status(r.status).type("application/json").send(text);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    console.error("SERVER ERROR:", err);
+
+    return res.status(500).json({
+      error: {
+        message: "Internal server error",
+        details: String(err),
+      },
+    });
   }
 });
 
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log("Groq proxy running on port", port));
+// =======================================================
+// START SERVER
+// =======================================================
+
+app.listen(PORT, () => {
+  console.log("====================================");
+  console.log("Groq proxy running on port", PORT);
+  console.log("Model:", MODEL);
+  console.log("====================================");
+});
