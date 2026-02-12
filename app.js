@@ -7,19 +7,18 @@ app.use(express.json({ limit: "10mb" }));
 app.get("/", (req, res) => res.send("ok"));
 
 /**
- * Godot plugin manda algo parecido com "Responses API" (input/tools).
- * A Groq usa "Chat Completions" (messages/tools).
- * Aqui a gente converte automaticamente.
+ * O plugin do Godot pode mandar payload estilo "Responses" (input/tools)
+ * e/ou enviar "model" de OpenAI (ex: gpt-4.1-mini).
+ * Aqui a gente converte para Groq (chat.completions) e IGNORA o model do cliente.
  */
 
-function normalizeToolsToResponsesStyle(body) {
+// Normaliza tools (aceita os dois formatos: Responses e Chat)
+function normalizeTools(body) {
   if (!body || !Array.isArray(body.tools)) return body;
 
-  // Se vier no formato Chat Completions:
-  // tools: [{type:"function", function:{name,description,parameters}}]
-  // Converter para Responses-style:
-  // tools: [{type:"function", name, description, parameters}]
   const tools = body.tools.map((t) => {
+    // Chat Completions style -> Responses style
+    // {type:"function", function:{name,description,parameters}} -> {type:"function", name, description, parameters}
     if (t && t.type === "function" && t.function && !t.name) {
       return {
         type: "function",
@@ -34,8 +33,9 @@ function normalizeToolsToResponsesStyle(body) {
   return { ...body, tools };
 }
 
-function responsesToGroqChat(body) {
-  const model = body.model || "llama-3.1-8b-instant";
+function toGroqChatPayload(body) {
+  // FORÇA um modelo Groq válido (ignora body.model)
+  const model = "llama-3.1-8b-instant";
 
   // messages
   let messages = [];
@@ -49,31 +49,35 @@ function responsesToGroqChat(body) {
     messages = [{ role: "user", content: "Hello" }];
   }
 
-  // tools -> formato do chat.completions
+  // tools -> formato do chat.completions (se existirem)
   let tools = undefined;
   if (Array.isArray(body.tools)) {
-    tools = body.tools.map((t) => {
-      // Responses-style -> Chat-style
-      if (t && t.type === "function" && t.name) {
-        return {
-          type: "function",
-          function: {
-            name: t.name,
-            description: t.description,
-            parameters: t.parameters,
-          },
-        };
-      }
-      // já está chat-style
-      return t;
-    });
+    tools = body.tools
+      .map((t) => {
+        // Responses style -> Chat style
+        if (t && t.type === "function" && t.name) {
+          return {
+            type: "function",
+            function: {
+              name: t.name,
+              description: t.description,
+              parameters: t.parameters,
+            },
+          };
+        }
+        // já está chat style
+        if (t && t.type === "function" && t.function && t.function.name) return t;
+        return null;
+      })
+      .filter(Boolean);
+    if (tools.length === 0) tools = undefined;
   }
 
   return {
     model,
     messages,
     tools,
-    tool_choice: body.tool_choice, // opcional
+    tool_choice: body.tool_choice,
     temperature: body.temperature ?? 0.2,
     max_tokens: body.max_output_tokens ?? body.max_tokens ?? 800,
   };
@@ -85,8 +89,8 @@ app.post("/", async (req, res) => {
       return res.status(500).json({ error: "GROQ_API_KEY not set on server" });
     }
 
-    const normalized = normalizeToolsToResponsesStyle(req.body);
-    const payload = responsesToGroqChat(normalized);
+    const normalized = normalizeTools(req.body);
+    const payload = toGroqChatPayload(normalized);
 
     const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
