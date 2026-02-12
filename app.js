@@ -1,22 +1,13 @@
 import express from "express";
 
 const app = express();
-app.use(express.json());
-
-// =======================================================
-// CONFIG
-// =======================================================
+app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 10000;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-
-// Modelo Groq leve e gratuito
 const MODEL = process.env.GROQ_MODEL || "llama3-8b-8192";
 
-// =======================================================
-// LOG DE TODAS AS REQUISIÇÕES (SEM app.all("*") BUGADO)
-// =======================================================
-
+// Logger
 app.use((req, res, next) => {
   console.log("====================================");
   console.log("INCOMING:", req.method, req.path);
@@ -25,43 +16,44 @@ app.use((req, res, next) => {
   next();
 });
 
-// =======================================================
-// ROTA RAIZ (TESTE NO NAVEGADOR)
-// =======================================================
-
+// Health
 app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    message: "Groq Godot Proxy is running!",
-    endpoint: "/v1/responses",
-    model: MODEL,
-  });
+  res.json({ status: "ok", endpoint: "/v1/responses", model: MODEL });
 });
+app.head("/", (req, res) => res.status(200).end());
 
-// =======================================================
-// GET /v1/responses (se abrir no navegador por engano)
-// =======================================================
+// Helper: extrair texto
+function extractUserText(body) {
+  if (!body) return "Olá";
 
-app.get("/v1/responses", (req, res) => {
+  if (typeof body.input === "string") return body.input;
+
+  if (Array.isArray(body.messages) && body.messages.length) {
+    const last = body.messages[body.messages.length - 1];
+    if (typeof last?.content === "string") return last.content;
+  }
+
+  if (Array.isArray(body.input)) return JSON.stringify(body.input);
+
+  if (typeof body.prompt === "string") return body.prompt;
+
+  return "Olá";
+}
+
+// Aceita GET/HEAD em /v1/responses e /v1/responses/
+app.get(["/v1/responses", "/v1/responses/"], (req, res) => {
   res.json({
     output: [
       {
-        content: [
-          {
-            type: "output_text",
-            text: "Este endpoint precisa ser chamado via POST.",
-          },
-        ],
+        content: [{ type: "output_text", text: "Use POST neste endpoint." }],
       },
     ],
   });
 });
+app.head(["/v1/responses", "/v1/responses/"], (req, res) => res.status(200).end());
 
-// =======================================================
-// POST /v1/responses (PRINCIPAL)
-// =======================================================
-
-app.post("/v1/responses", async (req, res) => {
+// Principal: POST em /v1/responses e /v1/responses/
+app.post(["/v1/responses", "/v1/responses/"], async (req, res) => {
   try {
     if (!GROQ_API_KEY) {
       return res.status(400).json({
@@ -69,97 +61,49 @@ app.post("/v1/responses", async (req, res) => {
       });
     }
 
-    // =======================================================
-    // Extrair texto enviado pelo plugin Godot
-    // =======================================================
+    const userText = extractUserText(req.body);
 
-    let userText = "Olá";
-
-    if (typeof req.body?.input === "string") {
-      userText = req.body.input;
-    } else if (Array.isArray(req.body?.messages)) {
-      const last = req.body.messages[req.body.messages.length - 1];
-      if (typeof last?.content === "string") userText = last.content;
-    } else if (Array.isArray(req.body?.input)) {
-      userText = JSON.stringify(req.body.input);
-    }
-
-    console.log("USER TEXT:", userText);
-
-    // =======================================================
-    // Chamada para Groq API (OpenAI compatible)
-    // =======================================================
-
-    const groqResp = await fetch(
-      "https://api.groq.com/openai/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          messages: [
-            {
-              role: "system",
-              content:
-                "Você é um assistente dentro do Godot, ajudando a criar jogos 2D.",
-            },
-            { role: "user", content: userText },
-          ],
-          temperature: 0.2,
-          max_tokens: 500,
-        }),
-      }
-    );
+    const groqResp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          { role: "system", content: "Você é um assistente dentro do Godot, ajudando a criar jogos 2D." },
+          { role: "user", content: userText },
+        ],
+        temperature: 0.2,
+        max_tokens: 500,
+      }),
+    });
 
     const data = await groqResp.json();
 
     if (!groqResp.ok) {
-      console.log("GROQ ERROR:", data);
       return res.status(groqResp.status).json({
-        error: {
-          message: "Groq API error",
-          details: data,
-        },
+        error: { message: "Groq API error", details: data },
       });
     }
 
-    const answer =
-      data?.choices?.[0]?.message?.content || "(Sem resposta do modelo)";
+    const answer = data?.choices?.[0]?.message?.content || "(Sem resposta do modelo)";
 
-    // =======================================================
-    // Retorno no formato Responses API (Godot plugin entende)
-    // =======================================================
-
+    // Formato Responses API
     return res.json({
       output: [
         {
-          content: [
-            {
-              type: "output_text",
-              text: answer,
-            },
-          ],
+          content: [{ type: "output_text", text: answer }],
         },
       ],
     });
   } catch (err) {
-    console.error("SERVER ERROR:", err);
-
     return res.status(500).json({
-      error: {
-        message: "Internal server error",
-        details: String(err),
-      },
+      error: { message: "Internal server error", details: String(err) },
     });
   }
 });
-
-// =======================================================
-// START SERVER
-// =======================================================
 
 app.listen(PORT, () => {
   console.log("====================================");
